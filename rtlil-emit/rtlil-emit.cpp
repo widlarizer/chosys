@@ -1,4 +1,5 @@
 #include "mlir/ExecutionEngine/ExecutionEngine.h"
+#include "mlir/IR/Attributes.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/OwningOpRef.h"
@@ -105,6 +106,7 @@ public:
       signature.push_back(portattr);
     }
     for (auto [param, value] : cell->parameters) {
+      log_assert(value.convertible_to_int());
       log_assert(value.is_fully_def());
       auto paramname = mlir::StringAttr::get(&ctx, param.c_str());
       mlir::Type itype = mlir::IntegerType::get(&ctx, value.size());
@@ -116,6 +118,17 @@ public:
     mlir::StringAttr cellname = mlir::StringAttr::get(&ctx, cell->name.c_str());
     mlir::StringAttr celltype = mlir::StringAttr::get(&ctx, cell->type.c_str());
     mlir::ArrayAttr cellsignature = b.getArrayAttr(signature);
+    for (auto& [name, value] : cell->attributes) {
+      if (auto i = value.try_as_int(true)) {
+        mlir::Type itype = mlir::IntegerType::get(&ctx, value.size(), mlir::IntegerType::Signed);
+        auto attrname = mlir::StringAttr::get(&ctx, name.c_str());
+        auto attrvalue  = mlir::IntegerAttr::get(itype, *i);
+        auto attr  = mlir::NamedAttribute(attrname, attrvalue);
+        attrs.push_back(attr);
+      } else {
+        log_error("Unsupported attribute %s on cell %s: RTLIL Const type unsupported by convertor: %s\n", name, cell->name, log_const(value));
+      }
+    }
     mlir::DictionaryAttr cellattrs = b.getDictionaryAttr(attrs);
     return b.create<rtlil::CellOp>(loc, cellname, celltype, connections,
                                    cellsignature, cellparameters, cellattrs);
@@ -253,7 +266,7 @@ public:
         c->attributes[name] = RTLIL::Const((long long)i.getInt());
       } else {
         // TODO add array of states
-        log_error("Non-string attributes %s on cell %s: MLIR type unsupported by convertor", name, c->name);
+        log_error("Non-string attribute %s on cell %s: MLIR type unsupported by convertor\n", name, c->name);
       }
     }
   }
