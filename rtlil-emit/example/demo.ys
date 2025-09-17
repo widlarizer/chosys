@@ -4,7 +4,6 @@ read_rtlil cpu.il
 # Prerequisites for an otherwise arbitrary design
 # to be cleanly roundtrippable
 proc -noopt
-setattr -unset full_case
 hierarchy -check -auto-top
 opt_clean -x
 # We never generate these in yosys, if we have some then it's because

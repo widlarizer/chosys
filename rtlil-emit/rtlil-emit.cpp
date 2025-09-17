@@ -1,16 +1,21 @@
 #include "mlir/ExecutionEngine/ExecutionEngine.h"
+#include "mlir/IR/AsmState.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/OwningOpRef.h"
 #include "mlir/IR/Verifier.h"
+#include "mlir/IR/AsmState.h"
 #include "mlir/Parser/Parser.h"
+#include "mlir/Bytecode/BytecodeReader.h"
+#include "mlir/Bytecode/BytecodeWriter.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Support/FileUtilities.h"
 #include "mlir/Support/LogicalResult.h"
 #include "mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Export.h"
+#include "llvm/Support/Debug.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_os_ostream.h"
 #include "llvm/Support/raw_ostream.h"
@@ -92,12 +97,10 @@ public:
   }
 
   rtlil::CellOp convert_cell(RTLIL::Cell *cell) {
-    // is this smart?
-    std::vector<mlir::Value> connections;
-    std::vector<mlir::Attribute> parameters;
-    std::vector<mlir::Attribute> signature;
-    std::vector<mlir::NamedAttribute> attrs;
     log_debug("converting cell %s\n", log_id(cell));
+
+    std::vector<mlir::Attribute> signature;
+    std::vector<mlir::Value> connections;
     for (auto [port, sigspec] : cell->connections()) {
       auto val = convert_sigspec(sigspec);
       connections.push_back(val);
@@ -105,6 +108,9 @@ public:
       auto portattr = mlir::StringAttr::get(&ctx, portname);
       signature.push_back(portattr);
     }
+    mlir::ArrayAttr cellsignature = b.getArrayAttr(signature);
+
+    std::vector<mlir::Attribute> parameters;
     for (auto [param, value] : cell->parameters) {
       log_assert(value.convertible_to_int());
       log_assert(value.is_fully_def());
@@ -115,22 +121,37 @@ public:
       parameters.push_back(parameter);
     }
     mlir::ArrayAttr cellparameters = b.getArrayAttr(parameters);
-    mlir::StringAttr cellname = mlir::StringAttr::get(&ctx, cell->name.c_str());
-    mlir::StringAttr celltype = mlir::StringAttr::get(&ctx, cell->type.c_str());
-    mlir::ArrayAttr cellsignature = b.getArrayAttr(signature);
+
+    std::vector<mlir::NamedAttribute> attrs;
+    auto cell_loc = loc;
     for (auto& [name, value] : cell->attributes) {
-      if (auto i = value.try_as_int(true)) {
-        mlir::Type itype = mlir::IntegerType::get(&ctx, value.size(), mlir::IntegerType::Signed);
-        auto attrname = mlir::StringAttr::get(&ctx, name.c_str());
-        auto attrvalue  = mlir::IntegerAttr::get(itype, *i);
+      mlir::StringAttr attrname = mlir::StringAttr::get(&ctx, cell->name.c_str());
+      if (name.str() == "\\src") {
+        mlir::StringAttr attrvalue = mlir::StringAttr::get(&ctx, value.decode_string());
+        cell_loc = mlir::FileLineColRange::get(attrvalue);
+        continue;
+      }
+      if (value.flags & RTLIL::ConstFlags::CONST_FLAG_STRING) {
+        mlir::StringAttr attrvalue = mlir::StringAttr::get(&ctx, value.decode_string());
         auto attr  = mlir::NamedAttribute(attrname, attrvalue);
         attrs.push_back(attr);
       } else {
-        log_error("Unsupported attribute %s on cell %s: RTLIL Const type unsupported by convertor: %s\n", name, cell->name, log_const(value));
+        if (auto i = value.try_as_int(true)) {
+          mlir::Type itype = mlir::IntegerType::get(&ctx, value.size(), mlir::IntegerType::Signed);
+          auto attrname = mlir::StringAttr::get(&ctx, name.c_str());
+          auto attrvalue  = mlir::IntegerAttr::get(itype, *i);
+          auto attr  = mlir::NamedAttribute(attrname, attrvalue);
+          attrs.push_back(attr);
+        } else {
+          log_error("Unsupported non-string attribute %s on cell %s: could not decode as int: %s\n", name, cell->name, log_const(value));
+        }
       }
     }
     mlir::DictionaryAttr cellattrs = b.getDictionaryAttr(attrs);
-    return b.create<rtlil::CellOp>(loc, cellname, celltype, connections,
+
+    mlir::StringAttr cellname = mlir::StringAttr::get(&ctx, cell->name.c_str());
+    mlir::StringAttr celltype = mlir::StringAttr::get(&ctx, cell->type.c_str());
+    return b.create<rtlil::CellOp>(cell_loc, cellname, celltype, connections,
                                    cellsignature, cellparameters, cellattrs);
   }
 
@@ -173,8 +194,17 @@ struct MlirBackend : public Backend {
     mlir::MLIRContext ctx;
     ctx.getOrLoadDialect<rtlil::RTLILDialect>();
     MLIRifier convertor(ctx);
-    for (auto mod : design->selected_modules())
-      convertor.convert_module(mod).print(osos);
+    mlir::OpPrintingFlags flags;
+    flags.enableDebugInfo(/*enable=*/true, /*prettyForm=*/false);
+    for (auto mod : design->selected_modules()) {
+      convertor.convert_module(mod).print(osos, flags);
+      // // llvm::StringRef producer = yosys_maybe_version();
+      // auto res = mlir::writeBytecodeToFile(convertor.convert_module(mod),
+      //                                      osos,
+      //                                      mlir::BytecodeWriterConfig());
+      // if (res.failed())
+      //   log_error("Failed to convert RTLIL module %s\n", mod->name);
+    }
   }
 } MlirBackend;
 
@@ -205,13 +235,9 @@ class RTLILifier {
       log_error("Unhandled RTLIL dialect value producing op\n");
     }
   }
-  void convertLoc(RTLIL::AttrObject* obj, const mlir::Location& loc) {
+  void convert_loc(RTLIL::AttrObject* obj, const mlir::Location& loc) {
     auto emitter = LocationEmitter(LoweringOptions::LocationInfoStyle::Plain, loc);
     obj->attributes[RTLIL::ID::src] = RTLIL::Const(emitter.strref().data());
-    // std::string s;
-    // llvm::raw_string_ostream os(s);
-    // loc.print(os);
-    // obj->attributes[RTLIL::ID::src] = RTLIL::Const(os.str());
   }
 
 public:
@@ -229,7 +255,7 @@ public:
   void convert_cell(RTLIL::Module *mod, rtlil::CellOpInterface op) {
     RTLIL::Cell *c =
         mod->addCell(std::string(op.getCellName()), std::string(op.getCellType()));
-    convertLoc(c, op.getLoc());
+    convert_loc(c, op.getLoc());
     std::vector<std::string> signature;
     for (auto port : op.getCellPorts()) {
       std::string portName = llvm::cast<mlir::StringAttr>(port).str();
@@ -250,10 +276,13 @@ public:
     // TODO special-case src attributes
     for (auto attr : op.getCellExtraAttrs()) {
       std::string name = attr.getName().str();
+      // llvm::dbgs() << attr.dump() << "\n";
+      log_debug("smelling %s:\n", name);
+      attr.getValue().dump();
       if (auto s = mlir::dyn_cast<mlir::StringAttr>(attr.getValue())) {
         c->attributes[name] = std::string(s.getValue());
       } else if (auto i = mlir::dyn_cast<mlir::IntegerAttr>(attr.getValue())) {
-        c->attributes[name] = RTLIL::Const((long long)i.getInt());
+        c->attributes[name] = RTLIL::Const((long long)i.getSInt());
       } else if (auto arr_attr = mlir::dyn_cast<mlir::ArrayAttr>(attr.getValue())) {
         llvm::ArrayRef arr_ref = arr_attr.getValue();
         std::vector<RTLIL::State> v;
@@ -263,7 +292,7 @@ public:
           else
             log_error("Attribute %s contains elements other state\n", name);
         }
-        c->attributes[name] = RTLIL::Const((long long)i.getInt());
+        c->attributes[name] = RTLIL::Const(std::move(v));
       } else {
         // TODO add array of states
         log_error("Non-string attribute %s on cell %s: MLIR type unsupported by convertor\n", name, c->name);
