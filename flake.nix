@@ -16,13 +16,14 @@
           zlib
           iverilog
           clang-yosys
-          clang-tools_19
-          clang_19
+          llvmPackages_19.clang-tools
+          llvmPackages_19.clang
           llvmPackages.bintools
           llvm
           cmake
           gnumake
           ninja
+          python3
         ];
         shellHook = ''
           export PATH=$PWD/circt/build/bin:$PATH;
