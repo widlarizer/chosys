@@ -19,7 +19,7 @@ splice -wires
 dump  -o mid.il
 # ---------------------------------------------------------------------------
 # Roundtrip through the MLIR RTLIL dialect
-write_mlir cpu.mlir
+write_mlir -asm cpu.mlir
 design -reset
 read_mlir cpu.mlir
 # ---------------------------------------------------------------------------
