@@ -23,6 +23,7 @@
 
 #include "circt/Dialect/RTLIL/RTLIL.h"
 #include "circt/Conversion/ExportVerilog.h"
+#include "circt/Support/LoweringOptions.h"
 
 // Malarkey - I think this is just not generally exposed?
 // TODO move elsewhere?
@@ -54,7 +55,8 @@ public:
     log_debug("converting wire %s\n", log_id(wire));
     log_assert(!wiremap.contains(wire));
     auto [wire_loc, wireattrs] = convert_attrs(wire, wire->name);
-    return wiremap[wire] = b.create<rtlil::WireOp>(
+    return wiremap[wire] = rtlil::WireOp::create(
+               b,
                wire_loc,
                rtlil::MValueType::get(
                    &ctx, mlir::IntegerAttr::get(b.getI32Type(), wire->width)),
@@ -76,7 +78,8 @@ public:
           rtlil::StateEnumAttr::get(&ctx, (rtlil::StateEnum)bit));
     mlir::ArrayAttr aa = b.getArrayAttr(const_bits);
     // TODO flags?
-    return b.create<rtlil::ConstOp>(
+    return rtlil::ConstOp::create(
+        b,
         loc,
         rtlil::MValueType::get(
             &ctx, mlir::IntegerAttr::get(b.getI32Type(), const_bits.size())),
@@ -162,14 +165,14 @@ public:
 
     mlir::StringAttr cellname = mlir::StringAttr::get(&ctx, cell->name.c_str());
     mlir::StringAttr celltype = mlir::StringAttr::get(&ctx, cell->type.c_str());
-    return b.create<rtlil::CellOp>(cell_loc, cellname, celltype, connections,
+    return rtlil::CellOp::create(b, cell_loc, cellname, celltype, connections,
                                    cellsignature, cellparameters, cellattrs);
   }
 
   rtlil::WConnectionOp convert_connection(RTLIL::SigSig ss) {
     log_debug("converting connection %s %s\n", log_signal(ss.first),
               log_signal(ss.second));
-    return b.create<rtlil::WConnectionOp>(loc, convert_sigspec(ss.first),
+    return rtlil::WConnectionOp::create(b, loc, convert_sigspec(ss.first),
                                           convert_sigspec(ss.second));
   }
 
